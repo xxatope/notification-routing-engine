@@ -32,7 +32,7 @@ object KafkaConsumerWorker:
     new KafkaConsumerWorker[F]:
       override def run: Stream[F, Unit] =
         if !config.enabled then
-          Stream.eval(logger.info("Kafka consumer is disabled (KAFKA_ENABLED=false)"))
+          Stream.eval(logger.info("Kafka consumer disabled (KAFKA_ENABLED=false). Worker idle.")) ++ Stream.never
         else
           KafkaConsumer
             .stream(consumerSettings)
@@ -40,22 +40,24 @@ object KafkaConsumerWorker:
             .records
             .parEvalMap(maxConcurrent) { committable =>
               val rawValue = committable.record.value
-              val processEffect = decode[NotificationRequest](rawValue) match
+              decode[NotificationRequest](rawValue) match
                 case Right(req) =>
-                  engine.submitNotification(req).flatMap {
-                    case Right(record) =>
-                      logger.info(s"Kafka processed notification: ${record.id} with status ${record.status}") *>
-                        committable.offset.commit
-                    case Left(err) =>
-                      logger.warn(s"Notification rejected in Kafka stream: ${err.message}") *>
-                        committable.offset.commit
-                  }
+                  engine
+                    .submitNotification(req)
+                    .flatMap {
+                      case Right(record) =>
+                        logger.info(s"Processed notification: ${record.id} with status ${record.status}") *>
+                          Async[F].pure(committable.offset)
+                      case Left(err) =>
+                        logger.warn(s"Notification rejected: ${err.message}") *>
+                          Async[F].pure(committable.offset)
+                    }
+                    .handleErrorWith { ex =>
+                      logger.error(s"Transient error processing notification: ${ex.getMessage}") *>
+                        Async[F].pure(committable.offset)
+                    }
                 case Left(parseErr) =>
-                  logger.error(s"Failed to parse Kafka message: ${parseErr.getMessage}. Sending to DLQ") *>
-                    committable.offset.commit
-
-              processEffect.handleErrorWith { ex =>
-                logger.error(s"Unhandled exception in Kafka processing: ${ex.getMessage}") *>
-                  committable.offset.commit
-              }
+                  logger.error(s"Failed to decode Kafka payload (malformed JSON): ${parseErr.getMessage}") *>
+                    Async[F].pure(committable.offset)
             }
+            .through(commitBatchWithin(batchSize = 50, batchTimeout = 1.second))

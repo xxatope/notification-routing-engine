@@ -38,12 +38,12 @@ object Main extends IOApp.Simple:
         repository = repo
       )
 
-      httpApp = NotificationRoutes.make[IO](engine).orNotFound
+      httpApp = NotificationRoutes.make[IO](engine, config.apiKey).orNotFound
       loggedApp = HttpLogger.httpApp(logHeaders = true, logBody = false)(httpApp)
 
       kafkaWorker = KafkaConsumerWorker.make[IO](config.kafka, engine)
 
-      serverFiber = EmberServerBuilder
+      serverResource = EmberServerBuilder
         .default[IO]
         .withHost(config.httpServer.host)
         .withPort(config.httpServer.port)
@@ -55,6 +55,6 @@ object Main extends IOApp.Simple:
             IO.never
         }
 
-      // Запуск сервера и Kafka-воркера с корректной отменой при завершении
-      _ <- IO.race(serverFiber, kafkaWorker.run.compile.drain).void
+      // Запуск сервера и фонового воркера вместе (both)
+      _ <- (serverResource, kafkaWorker.run.compile.drain).parTupled.void
     yield ()

@@ -14,12 +14,13 @@ import scala.concurrent.duration.*
 trait RoutingEngine[F[_]]:
   def submitNotification(request: NotificationRequest): F[Either[AppError, NotificationRecord]]
   def getNotification(id: UUID): F[Either[AppError, NotificationRecord]]
-  def getNotificationsForUser(userId: String): F[List[NotificationRecord]]
+  def getNotificationsForUser(userId: String, limit: Int = 50): F[List[NotificationRecord]]
 
 object RoutingEngine:
   final case class Config(
       pushTimeout: FiniteDuration = 3.seconds,
-      smsTimeout: FiniteDuration = 4.seconds
+      smsTimeout: FiniteDuration = 4.seconds,
+      inProgressLeaseTimeout: FiniteDuration = 30.seconds
   )
 
   def make[F[_]: Async: LoggerFactory](
@@ -39,8 +40,8 @@ object RoutingEngine:
           case None         => Left(AppError.NotFound(id))
         }
 
-      override def getNotificationsForUser(userId: String): F[List[NotificationRecord]] =
-        repository.listByUser(userId)
+      override def getNotificationsForUser(userId: String, limit: Int = 50): F[List[NotificationRecord]] =
+        repository.listByUser(userId, limit)
 
       override def submitNotification(request: NotificationRequest): F[Either[AppError, NotificationRecord]] =
         request.validate match
@@ -52,52 +53,64 @@ object RoutingEngine:
               now <- Async[F].realTimeInstant
               id  <- Async[F].delay(UUID.randomUUID())
 
-              allowed <- frequencyCapper.isAllowed(request.userId, request.priority)
-              result <-
-                if !allowed then
-                  val rateLimitedRecord = NotificationRecord(
-                    id = id,
-                    idempotencyKey = request.idempotencyKey,
-                    userId = request.userId,
-                    priority = request.priority,
-                    content = request.content,
-                    phone = request.phone,
-                    deviceToken = request.deviceToken,
-                    status = DeliveryStatus.RateLimited,
-                    createdAt = now,
-                    updatedAt = now
-                  )
-                  repository.insertIfAbsent(rateLimitedRecord).flatMap {
-                    case Right(_) =>
-                      Async[F].pure(Left(AppError.RateLimitExceeded(request.userId, frequencyCapper.maxLimit)))
-                    case Left(existing) =>
-                      logger.info(s"Duplicate request '${request.idempotencyKey}' detected during rate limit") *>
-                        Async[F].pure(Right(existing))
-                  }
-                else
-                  val initialRecord = NotificationRecord(
-                    id = id,
-                    idempotencyKey = request.idempotencyKey,
-                    userId = request.userId,
-                    priority = request.priority,
-                    content = request.content,
-                    phone = request.phone,
-                    deviceToken = request.deviceToken,
-                    status = DeliveryStatus.InProgress,
-                    createdAt = now,
-                    updatedAt = now
-                  )
-                  repository.insertIfAbsent(initialRecord).flatMap {
-                    case Left(existing) =>
-                      // Атомарно обнаружен дубликат
-                      logger.info(s"Duplicate request '${request.idempotencyKey}' detected. Returning existing record") *>
-                        frequencyCapper.refund(request.userId, request.priority) *>
-                        Async[F].pure(Right(existing))
+              initialRecord = NotificationRecord(
+                id = id,
+                idempotencyKey = request.idempotencyKey,
+                userId = request.userId,
+                priority = request.priority,
+                content = request.content,
+                phone = request.phone,
+                deviceToken = request.deviceToken,
+                status = DeliveryStatus.InProgress,
+                createdAt = now,
+                updatedAt = now
+              )
 
-                    case Right(_) =>
-                      processCascadeSafe(initialRecord)
-                  }
-            yield result
+              // Атомарная попытка вставки
+              insertResult <- repository.insertIfAbsent(initialRecord)
+              outcome <- insertResult match
+                case Left(existing) =>
+                  handleExistingRecord(existing, request, now)
+
+                case Right(newRecord) =>
+                  processNewRecord(newRecord, now)
+            yield outcome
+
+      private def handleExistingRecord(
+          existing: NotificationRecord,
+          request: NotificationRequest,
+          now: Instant
+      ): F[Either[AppError, NotificationRecord]] =
+        existing.status match
+          case DeliveryStatus.InProgress =>
+            val age = java.time.Duration.between(existing.updatedAt, now).toMillis
+            if age > config.inProgressLeaseTimeout.toMillis then
+              logger.warn(
+                s"Stale InProgress record detected for key '${request.idempotencyKey}' (age: ${age}ms). Resuming delivery."
+              ) *> processCascadeSafe(existing)
+            else
+              logger.info(s"Duplicate request '${request.idempotencyKey}' currently InProgress. Returning record.") *>
+                Async[F].pure(Right(existing))
+
+          case DeliveryStatus.RateLimited =>
+            Async[F].pure(Left(AppError.RateLimitExceeded(existing.userId, frequencyCapper.maxLimit)))
+
+          case _ =>
+            logger.info(s"Duplicate request '${request.idempotencyKey}' already completed. Returning existing.") *>
+              Async[F].pure(Right(existing))
+
+      private def processNewRecord(record: NotificationRecord, now: Instant): F[Either[AppError, NotificationRecord]] =
+        frequencyCapper.isAllowed(record.userId, record.priority).flatMap {
+          case false =>
+            val rateLimitedStatus = DeliveryStatus.RateLimited
+            for
+              _ <- repository.updateStatus(record.id, rateLimitedStatus, now)
+              _ <- logger.warn(s"Notification ${record.id} rate-limited for user ${record.userId}")
+            yield Left(AppError.RateLimitExceeded(record.userId, frequencyCapper.maxLimit))
+
+          case true =>
+            processCascadeSafe(record)
+        }
 
       private def processCascadeSafe(record: NotificationRecord): F[Either[AppError, NotificationRecord]] =
         val execution = executeCascade(record).attempt.flatMap {
@@ -123,7 +136,6 @@ object RoutingEngine:
         tryPush(record).flatMap {
           case Some(status) => Async[F].pure(status)
           case None =>
-            // Маркетинговые сообщения по умолчанию не отправляются в SMS во избежание лишних затрат
             if record.priority == Priority.Marketing && record.deviceToken.isDefined && record.phone.isDefined then
               logger.info(s"Marketing push failed for ${record.id}. Skipping paid SMS fallback.") *>
                 Async[F].pure(DeliveryStatus.Failed("Marketing push failed, SMS fallback omitted for marketing"))
@@ -180,7 +192,6 @@ object RoutingEngine:
                     SmsAttemptResult.Delivered(DeliveryStatus.Delivered(Channel.Sms, provider, ts))
                   )
                 case Right(SendResult.PermanentFailure(reason)) =>
-                  // При невалидном номере бессмысленно слать на резервного провайдера
                   Async[F].pure(SmsAttemptResult.PermanentFail(reason))
                 case Right(SendResult.TransientFailure(reason)) =>
                   logger.warn(s"Primary SMS transient failure: $reason") *> Async[F].pure(SmsAttemptResult.CanFallback)

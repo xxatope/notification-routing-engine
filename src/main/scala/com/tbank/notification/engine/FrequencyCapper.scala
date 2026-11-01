@@ -44,7 +44,7 @@ object InMemoryFrequencyCapper:
               }
               _ <-
                 if !allowed then
-                  logger.debug(s"User $userId reached rate limit ($config.maxMarketingPerWindow)")
+                  logger.debug(s"User $userId reached rate limit (${config.maxMarketingPerWindow})")
                 else Async[F].unit
             yield allowed
 

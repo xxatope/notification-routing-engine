@@ -6,7 +6,6 @@ val catsEffectVersion = "3.5.4"
 val http4sVersion     = "0.23.26"
 val tapirVersion      = "1.10.6"
 val circeVersion      = "0.14.7"
-val skunkVersion      = "0.6.3"
 val cirisVersion      = "3.6.0"
 val log4catsVersion   = "2.6.0"
 val logbackVersion    = "1.5.6"
@@ -14,7 +13,7 @@ val fs2KafkaVersion   = "3.5.1"
 val munitCeVersion    = "2.0.0"
 
 lazy val root = (project in file("."))
-  .enablePlugins(JavaAppPackaging, DockerPlugin)
+  .enablePlugins(JavaAppPackaging)
   .settings(
     name := "notification-routing-engine",
     scalacOptions ++= Seq(
@@ -33,7 +32,6 @@ lazy val root = (project in file("."))
       "io.circe"                    %% "circe-core"              % circeVersion,
       "io.circe"                    %% "circe-generic"           % circeVersion,
       "io.circe"                    %% "circe-parser"            % circeVersion,
-      "org.tpolecat"                %% "skunk-core"              % skunkVersion,
       "is.cir"                      %% "ciris"                   % cirisVersion,
       "org.typelevel"               %% "log4cats-slf4j"          % log4catsVersion,
       "ch.qos.logback"              %  "logback-classic"         % logbackVersion,

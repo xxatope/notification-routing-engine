@@ -11,6 +11,13 @@ sealed trait AppError extends Throwable with NoStackTrace:
   override def getMessage: String = message
 
 object AppError:
+  final case class Unauthorized(details: String = "Invalid or missing X-API-Key header") extends AppError:
+    val message = details
+
+  object Unauthorized:
+    given Codec[Unauthorized] = deriveCodec[Unauthorized]
+    given Schema[Unauthorized] = Schema.derived[Unauthorized]
+
   final case class AlreadyExists(idempotencyKey: String) extends AppError:
     val message = s"Notification with idempotencyKey '$idempotencyKey' already exists"
 

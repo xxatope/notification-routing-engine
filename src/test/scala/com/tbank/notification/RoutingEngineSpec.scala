@@ -1,10 +1,10 @@
 package com.tbank.notification
 
-import cats.effect.IO
+import cats.effect.{IO, Ref}
 import cats.syntax.all.*
 import com.tbank.notification.domain.*
 import com.tbank.notification.engine.{InMemoryFrequencyCapper, RoutingEngine}
-import com.tbank.notification.provider.{MockPushProvider, MockSmsProvider}
+import com.tbank.notification.provider.{MockPushProvider, MockSmsProvider, PushProvider, SmsProvider}
 import com.tbank.notification.repository.InMemoryNotificationRepository
 import munit.CatsEffectSuite
 import org.typelevel.log4cats.LoggerFactory
@@ -16,9 +16,9 @@ class RoutingEngineSpec extends CatsEffectSuite:
   given LoggerFactory[IO] = Slf4jFactory.create[IO]
 
   private def buildEngine(
-      pushProvider: com.tbank.notification.provider.PushProvider[IO] = MockPushProvider.make[IO](simulatedDelay = 10.millis),
-      smsPrimary: com.tbank.notification.provider.SmsProvider[IO] = MockSmsProvider.make[IO]("SMS-Primary", simulatedDelay = 10.millis),
-      smsSecondary: com.tbank.notification.provider.SmsProvider[IO] = MockSmsProvider.make[IO]("SMS-Backup", simulatedDelay = 10.millis),
+      pushProvider: PushProvider[IO] = MockPushProvider.make[IO](simulatedDelay = 10.millis),
+      smsPrimary: SmsProvider[IO] = MockSmsProvider.make[IO]("SMS-Primary", simulatedDelay = 10.millis),
+      smsSecondary: SmsProvider[IO] = MockSmsProvider.make[IO]("SMS-Backup", simulatedDelay = 10.millis),
       maxMarketing: Int = 2
   ): IO[RoutingEngine[IO]] =
     for
@@ -103,25 +103,105 @@ class RoutingEngineSpec extends CatsEffectSuite:
     }
   }
 
-  test("Atomic Idempotency: concurrent duplicate requests result in exactly one execution") {
+  test("Stop cascade when Primary SMS fails with PermanentFailure") {
+    val permanentFailSms = new SmsProvider[IO]:
+      def name: String = "Permanent-Fail-SMS"
+      def sendSms(phone: String, content: String): IO[SendResult] =
+        IO.pure(SendResult.PermanentFailure("Unallocated number"))
+
+    for
+      engine <- buildEngine(smsPrimary = permanentFailSms)
+      req = NotificationRequest(
+        idempotencyKey = "req-permanent",
+        userId = "user-perm",
+        priority = Priority.Critical,
+        content = "Alert",
+        phone = Some("+000123456"),
+        deviceToken = None
+      )
+      res <- engine.submitNotification(req)
+    yield {
+      assert(res.isRight)
+      res.toOption.get.status match
+        case DeliveryStatus.Failed(reason) =>
+          assert(reason.contains("SMS permanently failed"))
+        case other =>
+          fail(s"Expected DeliveryStatus.Failed, got $other")
+    }
+  }
+
+  test("Validation: reject empty content and missing destinations") {
+    for
+      engine <- buildEngine()
+      emptyReq = NotificationRequest(
+        idempotencyKey = "val-1",
+        userId = "user-val",
+        priority = Priority.Critical,
+        content = "",
+        phone = Some("+79991234567")
+      )
+      noDestReq = NotificationRequest(
+        idempotencyKey = "val-2",
+        userId = "user-val",
+        priority = Priority.Critical,
+        content = "Hello",
+        phone = None,
+        deviceToken = None
+      )
+      res1 <- engine.submitNotification(emptyReq)
+      res2 <- engine.submitNotification(noDestReq)
+    yield {
+      assert(res1.isLeft)
+      assert(res2.isLeft)
+    }
+  }
+
+  test("Atomic Idempotency: concurrent requests trigger provider send exactly ONCE") {
+    for
+      callCounter <- Ref.of[IO, Int](0)
+      countingPushProvider = new PushProvider[IO]:
+        def sendPush(token: String, content: String): IO[SendResult] =
+          callCounter.update(_ + 1) *> IO.sleep(20.millis) *> IO.pure(SendResult.Success("Counted-Push"))
+
+      engine <- buildEngine(pushProvider = countingPushProvider)
+      req = NotificationRequest(
+        idempotencyKey = "concurrent-key-exact-one",
+        userId = "user-parallel",
+        priority = Priority.Critical,
+        content = "Single delivery test",
+        phone = None,
+        deviceToken = Some("token-parallel")
+      )
+      // 5 одновременных запросов
+      results <- (1 to 5).toList.parTraverse(_ => engine.submitNotification(req))
+      totalCalls <- callCounter.get
+    yield {
+      assertEquals(totalCalls, 1, "Push provider must be invoked EXACTLY once despite concurrent requests")
+      val successful = results.collect { case Right(record) => record }
+      assertEquals(successful.size, 5)
+      val uniqueIds = successful.map(_.id).toSet
+      assertEquals(uniqueIds.size, 1)
+    }
+  }
+
+  test("Sequential duplicate request returns existing completed record") {
     for
       engine <- buildEngine()
       req = NotificationRequest(
-        idempotencyKey = "concurrent-key-777",
-        userId = "user-2",
+        idempotencyKey = "seq-idempotency-key",
+        userId = "user-seq",
         priority = Priority.Critical,
-        content = "Parallel test",
-        phone = Some("+79998887766"),
-        deviceToken = None
+        content = "Sequential test",
+        phone = Some("+79991112233"),
+        deviceToken = Some("valid-token")
       )
-      // Запускаем 5 конкурентных запросов с одним ключом одновременно
-      results <- (1 to 5).toList.parTraverse(_ => engine.submitNotification(req))
+      first  <- engine.submitNotification(req)
+      second <- engine.submitNotification(req)
     yield {
-      val successful = results.collect { case Right(record) => record }
-      assertEquals(successful.size, 5)
-      // Все ответы должны иметь одинаковый UUID (одна и та же запись)
-      val uniqueIds = successful.map(_.id).toSet
-      assertEquals(uniqueIds.size, 1, "Expected identical record ID across all concurrent attempts")
+      assert(first.isRight)
+      assert(second.isRight)
+      assertEquals(first.toOption.get.id, second.toOption.get.id)
+      assertEquals(first.toOption.get.status, second.toOption.get.status)
     }
   }
 

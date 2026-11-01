@@ -6,12 +6,14 @@ Notification routing and delivery service with automatic failover cascade, frequ
 
 ## Architecture & Design Decisions
 
-The service follows **Clean Architecture / Hexagonal Architecture**:
+The service follows **Hexagonal / Clean Architecture**:
 - **Domain Core**: Pure data types, sealed ADTs (`DeliveryStatus`, `SendResult`, `Priority`), zero external dependencies.
-- **Engine Layer**: `RoutingEngine` handles business logic, cascade fallbacks, and idempotency guarantees using pure functional effects (`F[_]`).
-- **Storage Layer**: Interface-driven (`NotificationRepository`). Includes a thread-safe, concurrent `InMemoryNotificationRepository` using `Ref.modify` for atomic Compare-And-Swap (CAS) operations.
-- **Event-Driven Ingestion**: Optional `KafkaConsumerWorker` powered by `fs2-kafka` for reactive event streaming.
-- **Zero Sensitive Data Leaks**: API responses strip message payload/OTP and device tokens; phone numbers and credentials are masked in logs and responses (`+7999****12`).
+- **Engine Layer**: `RoutingEngine` handles business logic, cascade fallbacks, stale lease recovery, and idempotency guarantees using pure functional effects (`F[_]`).
+- **Storage Layer**: Interface-driven (`NotificationRepository`). Default in-memory implementation provides atomic Compare-And-Swap (CAS) via `Ref.modify`.
+- **Event-Driven Ingestion**: Optional `KafkaConsumerWorker` powered by `fs2-kafka` for reactive event streaming with batch commit (`commitBatchWithin`).
+- **Security & Data Privacy**: 
+  - Authenticated endpoints via `X-API-Key` header.
+  - Zero sensitive data leaks: API responses strip message payload/OTP and device tokens; phone numbers and credentials are masked in logs and responses (`+7999****12`).
 
 ---
 
@@ -21,13 +23,15 @@ The service follows **Clean Architecture / Hexagonal Architecture**:
   - Tries fast / low-cost channels first (Push via APNS/FCM).
   - Automatically falls back to Primary SMS on timeout or transient errors.
   - Switches to Backup SMS provider if Primary SMS fails with transient error.
-  - Avoids redundant calls on permanent failures (e.g. invalid phone number).
+  - Terminates immediately on permanent failures (e.g. invalid phone number) without redundant calls.
   - Marketing notifications do not automatically spill into paid SMS channels.
 - **Traffic Prioritization**:
   - `CRITICAL`: 2FA codes, billing alerts (bypass frequency caps).
   - `MARKETING`: Promos and updates (capped per user sliding window).
 - **Atomic Idempotency**:
-  - Deduplication via `idempotencyKey`. Parallel requests with the same key atomically return the existing record without duplicate deliveries.
+  - Deduplication via `idempotencyKey`. Parallel requests with the same key trigger delivery **exactly once** and return the same record.
+- **Lease Timeout for Resiliency**:
+  - Automatically detects stale `InProgress` records on retry to prevent permanently stuck deliveries.
 - **Observability**:
   - Kubernetes probes: `/health/live` and `/health/ready`.
   - Type-safe OpenAPI / Swagger UI generated via **Tapir**.
@@ -46,16 +50,11 @@ The service follows **Clean Architecture / Hexagonal Architecture**:
 
 ## Getting Started
 
-### Prerequisites
-- JDK 21+
-- sbt 1.9+
-- Docker (optional)
-
 ### Running Locally
 ```bash
 sbt run
 ```
-The server will start on `http://localhost:8081`.
+The server starts on `http://localhost:8081`.
 Interactive Swagger UI: **http://localhost:8081/docs**
 
 ### Running Tests
@@ -79,6 +78,7 @@ docker compose up --build -d
 ### 1. Send Critical Notification (2FA)
 ```bash
 curl -X POST http://localhost:8081/api/v1/notifications \
+  -H "X-API-Key: tbank-secret-key-123" \
   -H "Content-Type: application/json" \
   -d '{
     "idempotencyKey": "auth-step-40291",
@@ -112,6 +112,7 @@ Response (`200 OK` — sensitive content and token are stripped):
 ### 2. Simulated Cascade Failover
 ```bash
 curl -X POST http://localhost:8081/api/v1/notifications \
+  -H "X-API-Key: tbank-secret-key-123" \
   -H "Content-Type: application/json" \
   -d '{
     "idempotencyKey": "auth-step-40292",

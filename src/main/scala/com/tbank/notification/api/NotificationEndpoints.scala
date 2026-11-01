@@ -18,10 +18,12 @@ object NotificationEndpoints:
     .summary("Readiness probe")
     .out(statusCode(StatusCode.Ok).and(stringBody))
 
-  private val baseEndpoint = endpoint
+  private val secureBaseEndpoint = endpoint
     .in("api" / "v1" / "notifications")
+    .in(header[Option[String]]("X-API-Key").description("API Authorization Key"))
     .errorOut(
       oneOf[AppError](
+        oneOfVariant(StatusCode.Unauthorized, jsonBody[AppError.Unauthorized].description("Authentication failed")),
         oneOfVariant(StatusCode.NotFound, jsonBody[AppError.NotFound].description("Notification not found")),
         oneOfVariant(StatusCode.Conflict, jsonBody[AppError.AlreadyExists].description("Duplicate request")),
         oneOfVariant(StatusCode.TooManyRequests, jsonBody[AppError.RateLimitExceeded].description("Marketing rate limit reached")),
@@ -30,19 +32,19 @@ object NotificationEndpoints:
       )
     )
 
-  val sendNotificationEndpoint = baseEndpoint.post
+  val sendNotificationEndpoint = secureBaseEndpoint.post
     .summary("Send or queue a notification")
     .description("Sends a notification with cascade fallback and anti-spam check. Sensitive data is stripped from response.")
     .in(jsonBody[NotificationRequest])
     .out(statusCode(StatusCode.Ok).and(jsonBody[NotificationResponse]))
 
-  val getNotificationEndpoint = baseEndpoint.get
+  val getNotificationEndpoint = secureBaseEndpoint.get
     .summary("Get notification details by ID")
     .in(path[UUID]("id").description("Notification UUID"))
     .out(statusCode(StatusCode.Ok).and(jsonBody[NotificationResponse]))
 
-  val getUserNotificationsEndpoint = baseEndpoint.get
+  val getUserNotificationsEndpoint = secureBaseEndpoint.get
     .summary("List notification history for a user")
     .in("user" / path[String]("userId").description("User ID"))
-    .in(query[Option[Int]]("limit").description("Max results (default 50)"))
+    .in(query[Option[Int]]("limit").description("Max results (1-100, default 50)"))
     .out(statusCode(StatusCode.Ok).and(jsonBody[List[NotificationResponse]]))
