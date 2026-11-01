@@ -8,6 +8,16 @@ import java.util.UUID
 
 object NotificationEndpoints:
 
+  val healthEndpoint = endpoint.get
+    .in("health" / "live")
+    .summary("Liveness check")
+    .out(statusCode(StatusCode.Ok).and(stringBody))
+
+  val readyEndpoint = endpoint.get
+    .in("health" / "ready")
+    .summary("Readiness check")
+    .out(statusCode(StatusCode.Ok).and(stringBody))
+
   private val baseEndpoint = endpoint
     .in("api" / "v1" / "notifications")
     .errorOut(

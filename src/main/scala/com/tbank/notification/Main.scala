@@ -4,8 +4,10 @@ import cats.effect.{IO, IOApp}
 import com.tbank.notification.api.NotificationRoutes
 import com.tbank.notification.config.AppConfig
 import com.tbank.notification.engine.{InMemoryFrequencyCapper, RoutingEngine}
+import com.tbank.notification.kafka.KafkaConsumerWorker
 import com.tbank.notification.provider.{MockPushProvider, MockSmsProvider}
 import com.tbank.notification.repository.InMemoryNotificationRepository
+import fs2.Stream
 import org.http4s.ember.server.EmberServerBuilder
 import org.http4s.server.middleware.Logger as HttpLogger
 import org.typelevel.log4cats.LoggerFactory
@@ -40,14 +42,22 @@ object Main extends IOApp.Simple:
       httpApp = NotificationRoutes.make[IO](engine).orNotFound
       loggedApp = HttpLogger.httpApp(logHeaders = true, logBody = false)(httpApp)
 
-      _ <- logger.info(s"Server started on http://${config.httpServer.host}:${config.httpServer.port}")
-      _ <- logger.info(s"Swagger UI available at http://localhost:${config.httpServer.port}/docs")
+      kafkaWorker = KafkaConsumerWorker.make[IO](config.kafka, engine)
 
-      _ <- EmberServerBuilder
-        .default[IO]
-        .withHost(config.httpServer.host)
-        .withPort(config.httpServer.port)
-        .withHttpApp(loggedApp)
-        .build
-        .useForever
+      httpServerStream = Stream.eval(
+        logger.info(s"Server started on http://${config.httpServer.host}:${config.httpServer.port}") *>
+          logger.info(s"Swagger UI available at http://localhost:${config.httpServer.port}/docs")
+      ).drain ++ Stream.resource(
+        EmberServerBuilder
+          .default[IO]
+          .withHost(config.httpServer.host)
+          .withPort(config.httpServer.port)
+          .withHttpApp(loggedApp)
+          .build
+      ).drain
+
+      _ <- Stream(
+        httpServerStream,
+        kafkaWorker.run
+      ).parJoinUnbounded.compile.drain
     yield ()

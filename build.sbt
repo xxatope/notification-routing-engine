@@ -10,10 +10,11 @@ val skunkVersion      = "0.6.3"
 val cirisVersion      = "3.6.0"
 val log4catsVersion   = "2.6.0"
 val logbackVersion    = "1.5.6"
+val fs2KafkaVersion   = "3.5.1"
 val munitCeVersion    = "2.0.0"
 
 lazy val root = (project in file("."))
-  .enablePlugins(JavaAppPackaging)
+  .enablePlugins(JavaAppPackaging, DockerPlugin)
   .settings(
     name := "notification-routing-engine",
     scalacOptions ++= Seq(
@@ -24,6 +25,7 @@ lazy val root = (project in file("."))
     libraryDependencies ++= Seq(
       "org.typelevel"               %% "cats-effect"             % catsEffectVersion,
       "co.fs2"                      %% "fs2-core"                % "3.10.2",
+      "com.github.fd4s"             %% "fs2-kafka"               % fs2KafkaVersion,
       "com.softwaremill.sttp.tapir" %% "tapir-http4s-server"     % tapirVersion,
       "com.softwaremill.sttp.tapir" %% "tapir-json-circe"        % tapirVersion,
       "com.softwaremill.sttp.tapir" %% "tapir-swagger-ui-bundle" % tapirVersion,

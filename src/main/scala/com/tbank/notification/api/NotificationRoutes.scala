@@ -11,6 +11,12 @@ import sttp.tapir.swagger.bundle.SwaggerInterpreter
 object NotificationRoutes:
 
   def make[F[_]: Async](engine: RoutingEngine[F]): HttpRoutes[F] =
+    val healthServerEndpoint: ServerEndpoint[Any, F] =
+      NotificationEndpoints.healthEndpoint.serverLogicSuccess(_ => Async[F].pure("UP"))
+
+    val readyServerEndpoint: ServerEndpoint[Any, F] =
+      NotificationEndpoints.readyEndpoint.serverLogicSuccess(_ => Async[F].pure("READY"))
+
     val sendServerEndpoint: ServerEndpoint[Any, F] =
       NotificationEndpoints.sendNotificationEndpoint.serverLogic(req => engine.submitNotification(req))
 
@@ -23,6 +29,8 @@ object NotificationRoutes:
       )
 
     val apiEndpoints: List[ServerEndpoint[Any, F]] = List(
+      healthServerEndpoint,
+      readyServerEndpoint,
       sendServerEndpoint,
       getNotificationServerEndpoint,
       getUserNotificationsServerEndpoint

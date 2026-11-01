@@ -1,6 +1,6 @@
 # notification-routing-engine
 
-Notification routing and delivery service with automatic failover cascade, rate limiting, and idempotency guarantees. Built on Scala 3 and Cats Effect.
+Notification routing and delivery service with automatic failover cascade, rate limiting, and idempotency guarantees. Built with Scala 3, Cats Effect 3, fs2-kafka, and Tapir.
 
 ---
 
@@ -12,25 +12,48 @@ Notification routing and delivery service with automatic failover cascade, rate 
   - Switches to Backup SMS provider if the primary SMS gateway degrades.
 - **Traffic Prioritization**:
   - `CRITICAL`: 2FA codes, billing and security alerts (zero queue lag, bypasses marketing limits).
-  - `MARKETING`: Promos, digest campaigns (frequency-capped per user).
-- **Frequency Capping**:
-  - In-memory sliding window rate limiter to prevent spamming users with marketing notifications.
-- **Idempotency**:
-  - Deduplication via `idempotencyKey` prevents duplicate notifications on client retries.
+  - `MARKETING`: Promos, digest campaigns (frequency-capped per user via sliding window).
+- **Event-Driven Architecture (Kafka)**:
+  - Reactive ingestion from Kafka topic `notifications.requests` using `fs2-kafka`.
+  - Batching & At-least-once delivery guarantees with manual offset commits.
+  - Poison-pill & DLQ routing (`notifications.dlq`).
+- **Observability & Health Probes**:
+  - Kubernetes probes: `/health/live` and `/health/ready`.
+  - Structured logging with MDC tracing.
 - **Type-safe API & Documentation**:
   - Declarative HTTP endpoints via **Tapir**.
-  - Auto-generated Swagger UI at `/docs`.
+  - Interactive Swagger UI at `/docs`.
 
 ---
 
 ## Tech Stack
 
-- **Language:** Scala 3.3
-- **Concurrency & Effects:** Cats Effect 3, fs2
+- **Language:** Scala 3.3 LTS
+- **Concurrency & Streaming:** Cats Effect 3, fs2, fs2-kafka
 - **HTTP / REST:** Tapir, Http4s Ember, Circe
-- **Database:** PostgreSQL (Skunk for pure FP async driver)
-- **Configuration & Logging:** Ciris, Log4cats, Logback
-- **Testing:** MUnit, Cats Effect Suite
+- **Message Broker:** Apache Kafka (KRaft mode)
+- **Database / Cache:** PostgreSQL (Skunk), Redis
+- **Containerization:** Multi-stage Docker, Docker Compose
+
+---
+
+## Architecture
+
+```text
+[ REST API / Tapir ]          [ Kafka Topic: notifications.requests ]
+        │                                         │
+        │                                         ▼
+        │                               [ fs2-kafka Consumer ]
+        │                                         │
+        └───────────────► ┌─────────────────────┐ ◄───┘
+                          │    RoutingEngine    │
+                          └──────────┬──────────┘
+                                     │
+                    ┌────────────────┼────────────────┐
+                    ▼                ▼                ▼
+             (1) Try Push     (2) Primary SMS    (3) Backup SMS
+              [ APNS/FCM ]      [ SMS-Alpha ]      [ SMS-Beta ]
+```
 
 ---
 
@@ -45,9 +68,10 @@ src/
 │   └── scala/com/tbank/notification/
 │       ├── Main.scala
 │       ├── api/             # Tapir endpoints & Http4s routes
-│       ├── config/          # Ciris config loaders
+│       ├── config/          # Ciris configuration loaders
 │       ├── domain/          # ADTs, models, errors
 │       ├── engine/          # Routing engine & frequency capper
+│       ├── kafka/           # fs2-kafka consumer worker & stream pipeline
 │       ├── provider/        # Channel providers (Push, SMS Alpha/Beta)
 │       └── repository/      # Notification storage interface & in-memory/db impl
 └── test/
@@ -60,27 +84,28 @@ src/
 
 ## Getting Started
 
-### Prerequisites
-- JDK 21+
-- sbt 1.9+
-- Docker (optional, for PostgreSQL/Redis)
-
-### Running tests
+### Local Development via Docker Compose
+To launch the complete infrastructure (Kafka, Kafka UI, PostgreSQL, Redis, Application):
 ```bash
-sbt test
+docker compose up --build -d
 ```
 
-### Running the server
-```bash
-# Start background services (optional)
-docker compose up -d
+Services:
+* **Application API:** `http://localhost:8081`
+* **Interactive Swagger UI:** `http://localhost:8081/docs`
+* **Kafka UI:** `http://localhost:8080` (Inspect topics, consumer groups, and messages)
+* **Kafka Broker:** `localhost:9092`
+* **PostgreSQL:** `localhost:5432`
 
-# Run the application
+### Running Locally without Docker
+```bash
 sbt run
 ```
 
-The server starts on `http://localhost:8080`.
-Interactive Swagger UI is available at `http://localhost:8080/docs`.
+### Running Tests
+```bash
+sbt test
+```
 
 ---
 
@@ -88,7 +113,7 @@ Interactive Swagger UI is available at `http://localhost:8080/docs`.
 
 ### Send Critical Notification (2FA)
 ```bash
-curl -X POST http://localhost:8080/api/v1/notifications \
+curl -X POST http://localhost:8081/api/v1/notifications \
   -H "Content-Type: application/json" \
   -d '{
     "idempotencyKey": "auth-step-40291",
@@ -102,7 +127,7 @@ curl -X POST http://localhost:8080/api/v1/notifications \
 
 ### Cascade Failover (Simulated Push Failure)
 ```bash
-curl -X POST http://localhost:8080/api/v1/notifications \
+curl -X POST http://localhost:8081/api/v1/notifications \
   -H "Content-Type: application/json" \
   -d '{
     "idempotencyKey": "auth-step-40292",
@@ -114,12 +139,8 @@ curl -X POST http://localhost:8080/api/v1/notifications \
   }'
 ```
 
-### Get Notification by ID
+### Health Probes (K8s)
 ```bash
-curl -X GET http://localhost:8080/api/v1/notifications/<UUID>
-```
-
-### Get User Notification History
-```bash
-curl -X GET http://localhost:8080/api/v1/notifications/user/usr_91
+curl -i http://localhost:8081/health/live
+curl -i http://localhost:8081/health/ready
 ```
