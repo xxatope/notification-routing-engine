@@ -1,6 +1,7 @@
 package com.tbank.notification.config
 
 import cats.effect.Async
+import cats.syntax.all.*
 import ciris.*
 import com.comcast.ip4s.{Host, Port, host, port}
 

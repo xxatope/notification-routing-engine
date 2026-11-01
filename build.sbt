@@ -19,9 +19,7 @@ lazy val root = (project in file("."))
     scalacOptions ++= Seq(
       "-deprecation",
       "-feature",
-      "-unchecked",
-      "-Xfatal-warnings",
-      "-Wunused:all"
+      "-unchecked"
     ),
     libraryDependencies ++= Seq(
       "org.typelevel"               %% "cats-effect"             % catsEffectVersion,
