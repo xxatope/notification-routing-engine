@@ -18,12 +18,12 @@ object AppConfig:
   def load[F[_]: Async]: F[AppConfig] =
     val config = (
       env("HTTP_HOST").as[String].default("0.0.0.0"),
-      env("HTTP_PORT").as[Int].default(8080)
+      env("HTTP_PORT").as[Int].default(8081)
     ).parMapN { (h, p) =>
       AppConfig(
         httpServer = HttpServerConfig(
           host = Host.fromString(h).getOrElse(host"0.0.0.0"),
-          port = Port.fromInt(p).getOrElse(port"8080")
+          port = Port.fromInt(p).getOrElse(port"8081")
         )
       )
     }
