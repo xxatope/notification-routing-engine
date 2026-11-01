@@ -1,6 +1,7 @@
 package com.tbank.notification.engine
 
 import cats.effect.Async
+import cats.effect.syntax.temporal.*
 import cats.syntax.all.*
 import com.tbank.notification.domain.*
 import com.tbank.notification.provider.{PushProvider, SmsProvider}
