@@ -2,10 +2,11 @@ package com.tbank.notification.domain
 
 import io.circe.Codec
 import io.circe.generic.semiauto.*
+import scala.util.control.NoStackTrace
 import sttp.tapir.Schema
 import java.util.UUID
 
-sealed trait AppError extends Throwable:
+sealed trait AppError extends Throwable with NoStackTrace:
   def message: String
   override def getMessage: String = message
 

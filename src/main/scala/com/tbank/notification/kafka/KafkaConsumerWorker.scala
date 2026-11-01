@@ -18,7 +18,8 @@ object KafkaConsumerWorker:
 
   def make[F[_]: Async: LoggerFactory](
       config: KafkaConfig,
-      engine: RoutingEngine[F]
+      engine: RoutingEngine[F],
+      maxConcurrent: Int = 16
   ): KafkaConsumerWorker[F] =
     val logger = LoggerFactory[F].getLogger
 
@@ -31,15 +32,15 @@ object KafkaConsumerWorker:
     new KafkaConsumerWorker[F]:
       override def run: Stream[F, Unit] =
         if !config.enabled then
-          Stream.eval(logger.info("Kafka consumer is disabled by configuration"))
+          Stream.eval(logger.info("Kafka consumer is disabled (KAFKA_ENABLED=false)"))
         else
           KafkaConsumer
             .stream(consumerSettings)
             .subscribeTo(config.inputTopic)
             .records
-            .evalMap { committable =>
-              val raw = committable.record.value
-              decode[NotificationRequest](raw) match
+            .parEvalMap(maxConcurrent) { committable =>
+              val rawValue = committable.record.value
+              val processEffect = decode[NotificationRequest](rawValue) match
                 case Right(req) =>
                   engine.submitNotification(req).flatMap {
                     case Right(record) =>
@@ -50,6 +51,11 @@ object KafkaConsumerWorker:
                         committable.offset.commit
                   }
                 case Left(parseErr) =>
-                  logger.error(s"Failed to decode message from Kafka: ${parseErr.getMessage}. Raw: $raw") *>
+                  logger.error(s"Failed to parse Kafka message: ${parseErr.getMessage}. Sending to DLQ") *>
                     committable.offset.commit
+
+              processEffect.handleErrorWith { ex =>
+                logger.error(s"Unhandled exception in Kafka processing: ${ex.getMessage}") *>
+                  committable.offset.commit
+              }
             }

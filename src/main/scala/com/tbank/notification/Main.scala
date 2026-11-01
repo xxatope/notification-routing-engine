@@ -7,7 +7,6 @@ import com.tbank.notification.engine.{InMemoryFrequencyCapper, RoutingEngine}
 import com.tbank.notification.kafka.KafkaConsumerWorker
 import com.tbank.notification.provider.{MockPushProvider, MockSmsProvider}
 import com.tbank.notification.repository.InMemoryNotificationRepository
-import fs2.Stream
 import org.http4s.ember.server.EmberServerBuilder
 import org.http4s.server.middleware.Logger as HttpLogger
 import org.typelevel.log4cats.LoggerFactory
@@ -21,7 +20,7 @@ object Main extends IOApp.Simple:
     val logger = LoggerFactory[IO].getLogger
 
     for
-      _      <- logger.info("Starting Notification Routing Engine...")
+      _      <- logger.info("Initializing Notification Routing Engine...")
       config <- AppConfig.load[IO]
 
       repo            <- InMemoryNotificationRepository.make[IO]
@@ -44,20 +43,18 @@ object Main extends IOApp.Simple:
 
       kafkaWorker = KafkaConsumerWorker.make[IO](config.kafka, engine)
 
-      httpServerStream = Stream.eval(
-        logger.info(s"Server started on http://${config.httpServer.host}:${config.httpServer.port}") *>
-          logger.info(s"Swagger UI available at http://localhost:${config.httpServer.port}/docs")
-      ).drain ++ Stream.resource(
-        EmberServerBuilder
-          .default[IO]
-          .withHost(config.httpServer.host)
-          .withPort(config.httpServer.port)
-          .withHttpApp(loggedApp)
-          .build
-      ).drain
+      serverFiber = EmberServerBuilder
+        .default[IO]
+        .withHost(config.httpServer.host)
+        .withPort(config.httpServer.port)
+        .withHttpApp(loggedApp)
+        .build
+        .use { server =>
+          logger.info(s"Server successfully bound to http://${server.address.getHostString}:${server.address.getPort}") *>
+            logger.info(s"Interactive Swagger UI: http://localhost:${server.address.getPort}/docs") *>
+            IO.never
+        }
 
-      _ <- Stream(
-        httpServerStream,
-        kafkaWorker.run
-      ).parJoinUnbounded.compile.drain
+      // Запуск сервера и Kafka-воркера с корректной отменой при завершении
+      _ <- IO.race(serverFiber, kafkaWorker.run.compile.drain).void
     yield ()

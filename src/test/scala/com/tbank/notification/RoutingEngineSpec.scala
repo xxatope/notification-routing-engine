@@ -103,24 +103,25 @@ class RoutingEngineSpec extends CatsEffectSuite:
     }
   }
 
-  test("Idempotency: duplicate request returns the exact same record without reprocessing") {
+  test("Atomic Idempotency: concurrent duplicate requests result in exactly one execution") {
     for
       engine <- buildEngine()
       req = NotificationRequest(
-        idempotencyKey = "idempotent-key-999",
+        idempotencyKey = "concurrent-key-777",
         userId = "user-2",
-        priority = Priority.Marketing,
-        content = "10% cashback on coffee",
+        priority = Priority.Critical,
+        content = "Parallel test",
         phone = Some("+79998887766"),
         deviceToken = None
       )
-      first  <- engine.submitNotification(req)
-      second <- engine.submitNotification(req)
+      // Запускаем 5 конкурентных запросов с одним ключом одновременно
+      results <- (1 to 5).toList.parTraverse(_ => engine.submitNotification(req))
     yield {
-      assert(first.isRight)
-      assert(second.isRight)
-      assertEquals(first.toOption.get.id, second.toOption.get.id, "IDs must match")
-      assertEquals(first.toOption.get.status, second.toOption.get.status, "Statuses must match")
+      val successful = results.collect { case Right(record) => record }
+      assertEquals(successful.size, 5)
+      // Все ответы должны иметь одинаковый UUID (одна и та же запись)
+      val uniqueIds = successful.map(_.id).toSet
+      assertEquals(uniqueIds.size, 1, "Expected identical record ID across all concurrent attempts")
     }
   }
 
@@ -147,7 +148,9 @@ class RoutingEngineSpec extends CatsEffectSuite:
       assert(res1.isRight, "First promo must succeed")
       assert(res2.isLeft, "Second promo must be rejected due to limit")
       res2.left.toOption.get match
-        case AppError.RateLimitExceeded(user, _) => assertEquals(user, "user-marketing-test")
+        case AppError.RateLimitExceeded(user, limit) =>
+          assertEquals(user, "user-marketing-test")
+          assertEquals(limit, 1)
         case other => fail(s"Expected RateLimitExceeded, but got: $other")
     }
   }

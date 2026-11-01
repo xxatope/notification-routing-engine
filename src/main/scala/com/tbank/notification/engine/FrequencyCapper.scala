@@ -8,7 +8,9 @@ import java.time.Instant
 import scala.concurrent.duration.*
 
 trait FrequencyCapper[F[_]]:
+  def maxLimit: Int
   def isAllowed(userId: String, priority: Priority): F[Boolean]
+  def refund(userId: String, priority: Priority): F[Unit]
 
 object InMemoryFrequencyCapper:
   final case class Config(
@@ -21,6 +23,9 @@ object InMemoryFrequencyCapper:
       logger <- LoggerFactory[F].create
       state  <- Ref.of[F, Map[String, Vector[Instant]]](Map.empty)
     yield new FrequencyCapper[F]:
+
+      override def maxLimit: Int = config.maxMarketingPerWindow
+
       override def isAllowed(userId: String, priority: Priority): F[Boolean] =
         priority match
           case Priority.Critical =>
@@ -31,16 +36,26 @@ object InMemoryFrequencyCapper:
               now <- Async[F].realTimeInstant
               cutoff = now.minusMillis(config.windowDuration.toMillis)
               allowed <- state.modify { map =>
-                val userTimestamps = map.getOrElse(userId, Vector.empty).filter(_.isAfter(cutoff))
-                if userTimestamps.size >= config.maxMarketingPerWindow then
-                  (map.updated(userId, userTimestamps), false)
+                val activeTimestamps = map.getOrElse(userId, Vector.empty).filter(_.isAfter(cutoff))
+                if activeTimestamps.size >= config.maxMarketingPerWindow then
+                  (map.updated(userId, activeTimestamps), false)
                 else
-                  (map.updated(userId, userTimestamps :+ now), true)
+                  (map.updated(userId, activeTimestamps :+ now), true)
               }
               _ <-
                 if !allowed then
-                  logger.warn(
-                    s"[FrequencyCapper] User $userId exceeded marketing limit of ${config.maxMarketingPerWindow} per ${config.windowDuration}"
-                  )
+                  logger.debug(s"User $userId reached rate limit ($config.maxMarketingPerWindow)")
                 else Async[F].unit
             yield allowed
+
+      override def refund(userId: String, priority: Priority): F[Unit] =
+        priority match
+          case Priority.Critical => Async[F].unit
+          case Priority.Marketing =>
+            state.update { map =>
+              map.get(userId) match
+                case Some(timestamps) if timestamps.nonEmpty =>
+                  map.updated(userId, timestamps.dropRight(1))
+                case _ =>
+                  map
+            }

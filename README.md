@@ -1,6 +1,17 @@
 # notification-routing-engine
 
-Notification routing and delivery service with automatic failover cascade, rate limiting, and idempotency guarantees. Built with Scala 3, Cats Effect 3, fs2-kafka, and Tapir.
+Notification routing and delivery service with automatic failover cascade, frequency capping (anti-spam), and atomic idempotency. Built on Scala 3, Cats Effect 3, fs2, and Tapir.
+
+---
+
+## Architecture & Design Decisions
+
+The service follows **Clean Architecture / Hexagonal Architecture**:
+- **Domain Core**: Pure data types, sealed ADTs (`DeliveryStatus`, `SendResult`, `Priority`), zero external dependencies.
+- **Engine Layer**: `RoutingEngine` handles business logic, cascade fallbacks, and idempotency guarantees using pure functional effects (`F[_]`).
+- **Storage Layer**: Interface-driven (`NotificationRepository`). Includes a thread-safe, concurrent `InMemoryNotificationRepository` using `Ref.modify` for atomic Compare-And-Swap (CAS) operations.
+- **Event-Driven Ingestion**: Optional `KafkaConsumerWorker` powered by `fs2-kafka` for reactive event streaming.
+- **Zero Sensitive Data Leaks**: API responses strip message payload/OTP and device tokens; phone numbers and credentials are masked in logs and responses (`+7999****12`).
 
 ---
 
@@ -9,20 +20,17 @@ Notification routing and delivery service with automatic failover cascade, rate 
 - **Cascade Failover**:
   - Tries fast / low-cost channels first (Push via APNS/FCM).
   - Automatically falls back to Primary SMS on timeout or transient errors.
-  - Switches to Backup SMS provider if the primary SMS gateway degrades.
+  - Switches to Backup SMS provider if Primary SMS fails with transient error.
+  - Avoids redundant calls on permanent failures (e.g. invalid phone number).
+  - Marketing notifications do not automatically spill into paid SMS channels.
 - **Traffic Prioritization**:
-  - `CRITICAL`: 2FA codes, billing and security alerts (zero queue lag, bypasses marketing limits).
-  - `MARKETING`: Promos, digest campaigns (frequency-capped per user via sliding window).
-- **Event-Driven Architecture (Kafka)**:
-  - Reactive ingestion from Kafka topic `notifications.requests` using `fs2-kafka`.
-  - Batching & At-least-once delivery guarantees with manual offset commits.
-  - Poison-pill & DLQ routing (`notifications.dlq`).
-- **Observability & Health Probes**:
+  - `CRITICAL`: 2FA codes, billing alerts (bypass frequency caps).
+  - `MARKETING`: Promos and updates (capped per user sliding window).
+- **Atomic Idempotency**:
+  - Deduplication via `idempotencyKey`. Parallel requests with the same key atomically return the existing record without duplicate deliveries.
+- **Observability**:
   - Kubernetes probes: `/health/live` and `/health/ready`.
-  - Structured logging with MDC tracing.
-- **Type-safe API & Documentation**:
-  - Declarative HTTP endpoints via **Tapir**.
-  - Interactive Swagger UI at `/docs`.
+  - Type-safe OpenAPI / Swagger UI generated via **Tapir**.
 
 ---
 
@@ -30,88 +38,45 @@ Notification routing and delivery service with automatic failover cascade, rate 
 
 - **Language:** Scala 3.3 LTS
 - **Concurrency & Streaming:** Cats Effect 3, fs2, fs2-kafka
-- **HTTP / REST:** Tapir, Http4s Ember, Circe
-- **Message Broker:** Apache Kafka (KRaft mode)
-- **Database / Cache:** PostgreSQL (Skunk), Redis
-- **Containerization:** Multi-stage Docker, Docker Compose
-
----
-
-## Architecture
-
-```text
-[ REST API / Tapir ]          [ Kafka Topic: notifications.requests ]
-        │                                         │
-        │                                         ▼
-        │                               [ fs2-kafka Consumer ]
-        │                                         │
-        └───────────────► ┌─────────────────────┐ ◄───┘
-                          │    RoutingEngine    │
-                          └──────────┬──────────┘
-                                     │
-                    ┌────────────────┼────────────────┐
-                    ▼                ▼                ▼
-             (1) Try Push     (2) Primary SMS    (3) Backup SMS
-              [ APNS/FCM ]      [ SMS-Alpha ]      [ SMS-Beta ]
-```
-
----
-
-## Project Structure
-
-```text
-src/
-├── main/
-│   ├── resources/
-│   │   ├── application.conf
-│   │   └── db/migration/V1__init.sql
-│   └── scala/com/tbank/notification/
-│       ├── Main.scala
-│       ├── api/             # Tapir endpoints & Http4s routes
-│       ├── config/          # Ciris configuration loaders
-│       ├── domain/          # ADTs, models, errors
-│       ├── engine/          # Routing engine & frequency capper
-│       ├── kafka/           # fs2-kafka consumer worker & stream pipeline
-│       ├── provider/        # Channel providers (Push, SMS Alpha/Beta)
-│       └── repository/      # Notification storage interface & in-memory/db impl
-└── test/
-    └── scala/com/tbank/notification/
-        ├── FrequencyCapperSpec.scala
-        └── RoutingEngineSpec.scala
-```
+- **HTTP Engine:** Tapir, Http4s Ember, Circe
+- **Logging:** Log4cats, Logback
+- **Testing:** MUnit, Cats Effect Testing Suite
 
 ---
 
 ## Getting Started
 
-### Local Development via Docker Compose
-To launch the complete infrastructure (Kafka, Kafka UI, PostgreSQL, Redis, Application):
-```bash
-docker compose up --build -d
-```
+### Prerequisites
+- JDK 21+
+- sbt 1.9+
+- Docker (optional)
 
-Services:
-* **Application API:** `http://localhost:8081`
-* **Interactive Swagger UI:** `http://localhost:8081/docs`
-* **Kafka UI:** `http://localhost:8080` (Inspect topics, consumer groups, and messages)
-* **Kafka Broker:** `localhost:9092`
-* **PostgreSQL:** `localhost:5432`
-
-### Running Locally without Docker
+### Running Locally
 ```bash
 sbt run
 ```
+The server will start on `http://localhost:8081`.
+Interactive Swagger UI: **http://localhost:8081/docs**
 
 ### Running Tests
 ```bash
 sbt test
 ```
 
+### Running with Docker & Kafka
+To start the application alongside Kafka and Kafka UI:
+```bash
+docker compose up --build -d
+```
+* **Application API:** `http://localhost:8081`
+* **Swagger Documentation:** `http://localhost:8081/docs`
+* **Kafka UI:** `http://localhost:8080`
+
 ---
 
 ## API Examples
 
-### Send Critical Notification (2FA)
+### 1. Send Critical Notification (2FA)
 ```bash
 curl -X POST http://localhost:8081/api/v1/notifications \
   -H "Content-Type: application/json" \
@@ -119,13 +84,32 @@ curl -X POST http://localhost:8081/api/v1/notifications \
     "idempotencyKey": "auth-step-40291",
     "userId": "usr_91",
     "priority": "CRITICAL",
-    "content": "Your login code: 9140",
+    "content": "Your verification code: 9140",
     "phone": "+79991234567",
     "deviceToken": "device-token-abc"
   }'
 ```
+Response (`200 OK` — sensitive content and token are stripped):
+```json
+{
+  "id": "e6a8a18a-a9ad-4bd2-8a9e-880a44abafd3",
+  "idempotencyKey": "auth-step-40291",
+  "userId": "usr_91",
+  "priority": "CRITICAL",
+  "maskedPhone": "+799****67",
+  "status": {
+    "Delivered": {
+      "channel": "PUSH",
+      "provider": "APNS-FCM-Gateway",
+      "deliveredAt": "2026-11-01T20:15:33.729997Z"
+    }
+  },
+  "createdAt": "2026-11-01T20:15:33.485Z",
+  "updatedAt": "2026-11-01T20:15:33.731Z"
+}
+```
 
-### Cascade Failover (Simulated Push Failure)
+### 2. Simulated Cascade Failover
 ```bash
 curl -X POST http://localhost:8081/api/v1/notifications \
   -H "Content-Type: application/json" \
@@ -133,13 +117,13 @@ curl -X POST http://localhost:8081/api/v1/notifications \
     "idempotencyKey": "auth-step-40292",
     "userId": "usr_91",
     "priority": "CRITICAL",
-    "content": "Password reset verification: 3341",
+    "content": "Password reset alert",
     "phone": "+79991234567",
     "deviceToken": "fail-transient-push-token"
   }'
 ```
 
-### Health Probes (K8s)
+### 3. Health Probes
 ```bash
 curl -i http://localhost:8081/health/live
 curl -i http://localhost:8081/health/ready

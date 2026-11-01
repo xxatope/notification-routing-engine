@@ -7,32 +7,62 @@ import java.time.Instant
 import java.util.UUID
 
 trait NotificationRepository[F[_]]:
-  def insert(record: NotificationRecord): F[Unit]
+  def insertIfAbsent(record: NotificationRecord): F[Either[NotificationRecord, NotificationRecord]]
   def findById(id: UUID): F[Option[NotificationRecord]]
   def findByIdempotencyKey(key: String): F[Option[NotificationRecord]]
   def updateStatus(id: UUID, status: DeliveryStatus, updatedAt: Instant): F[Unit]
-  def listByUser(userId: String): F[List[NotificationRecord]]
+  def listByUser(userId: String, limit: Int = 50): F[List[NotificationRecord]]
 
 object InMemoryNotificationRepository:
+
+  private final case class State(
+      byId: Map[UUID, NotificationRecord] = Map.empty,
+      byKey: Map[String, UUID] = Map.empty,
+      byUser: Map[String, Vector[UUID]] = Map.empty
+  )
+
   def make[F[_]: Async]: F[NotificationRepository[F]] =
-    Ref.of[F, Map[UUID, NotificationRecord]](Map.empty).map { storage =>
+    Ref.of[F, State](State()).map { storage =>
       new NotificationRepository[F]:
-        override def insert(record: NotificationRecord): F[Unit] =
-          storage.update(_.updated(record.id, record))
 
-        override def findById(id: UUID): F[Option[NotificationRecord]] =
-          storage.get.map(_.get(id))
-
-        override def findByIdempotencyKey(key: String): F[Option[NotificationRecord]] =
-          storage.get.map(_.values.find(_.idempotencyKey == key))
-
-        override def updateStatus(id: UUID, status: DeliveryStatus, updatedAt: Instant): F[Unit] =
-          storage.update { map =>
-            map.get(id) match
-              case Some(existing) => map.updated(id, existing.copy(status = status, updatedAt = updatedAt))
-              case None           => map
+        override def insertIfAbsent(record: NotificationRecord): F[Either[NotificationRecord, NotificationRecord]] =
+          storage.modify { state =>
+            state.byKey.get(record.idempotencyKey) match
+              case Some(existingId) =>
+                val existingRecord = state.byId(existingId)
+                (state, Left(existingRecord))
+              case None =>
+                val updatedState = state.copy(
+                  byId = state.byId.updated(record.id, record),
+                  byKey = state.byKey.updated(record.idempotencyKey, record.id),
+                  byUser = state.byUser.updated(
+                    record.userId,
+                    state.byUser.getOrElse(record.userId, Vector.empty) :+ record.id
+                  )
+                )
+                (updatedState, Right(record))
           }
 
-        override def listByUser(userId: String): F[List[NotificationRecord]] =
-          storage.get.map(_.values.filter(_.userId == userId).toList.sortBy(_.createdAt)(Ordering[Instant].reverse))
+        override def findById(id: UUID): F[Option[NotificationRecord]] =
+          storage.get.map(_.byId.get(id))
+
+        override def findByIdempotencyKey(key: String): F[Option[NotificationRecord]] =
+          storage.get.map { state =>
+            state.byKey.get(key).flatMap(state.byId.get)
+          }
+
+        override def updateStatus(id: UUID, status: DeliveryStatus, updatedAt: Instant): F[Unit] =
+          storage.update { state =>
+            state.byId.get(id) match
+              case Some(existing) =>
+                state.copy(byId = state.byId.updated(id, existing.copy(status = status, updatedAt = updatedAt)))
+              case None =>
+                state
+          }
+
+        override def listByUser(userId: String, limit: Int = 50): F[List[NotificationRecord]] =
+          storage.get.map { state =>
+            val userIds = state.byUser.getOrElse(userId, Vector.empty).takeRight(limit)
+            userIds.flatMap(state.byId.get).toList.sortBy(_.createdAt)(Ordering[Instant].reverse)
+          }
     }

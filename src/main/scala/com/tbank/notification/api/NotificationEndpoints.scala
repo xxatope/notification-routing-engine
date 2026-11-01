@@ -10,12 +10,12 @@ object NotificationEndpoints:
 
   val healthEndpoint = endpoint.get
     .in("health" / "live")
-    .summary("Liveness check")
+    .summary("Liveness probe")
     .out(statusCode(StatusCode.Ok).and(stringBody))
 
   val readyEndpoint = endpoint.get
     .in("health" / "ready")
-    .summary("Readiness check")
+    .summary("Readiness probe")
     .out(statusCode(StatusCode.Ok).and(stringBody))
 
   private val baseEndpoint = endpoint
@@ -32,16 +32,17 @@ object NotificationEndpoints:
 
   val sendNotificationEndpoint = baseEndpoint.post
     .summary("Send or queue a notification")
-    .description("Sends a notification with cascade fallback (Push -> SMS Alpha -> SMS Beta) and anti-spam check")
+    .description("Sends a notification with cascade fallback and anti-spam check. Sensitive data is stripped from response.")
     .in(jsonBody[NotificationRequest])
-    .out(statusCode(StatusCode.Ok).and(jsonBody[NotificationRecord]))
+    .out(statusCode(StatusCode.Ok).and(jsonBody[NotificationResponse]))
 
   val getNotificationEndpoint = baseEndpoint.get
     .summary("Get notification details by ID")
     .in(path[UUID]("id").description("Notification UUID"))
-    .out(statusCode(StatusCode.Ok).and(jsonBody[NotificationRecord]))
+    .out(statusCode(StatusCode.Ok).and(jsonBody[NotificationResponse]))
 
   val getUserNotificationsEndpoint = baseEndpoint.get
     .summary("List notification history for a user")
     .in("user" / path[String]("userId").description("User ID"))
-    .out(statusCode(StatusCode.Ok).and(jsonBody[List[NotificationRecord]]))
+    .in(query[Option[Int]]("limit").description("Max results (default 50)"))
+    .out(statusCode(StatusCode.Ok).and(jsonBody[List[NotificationResponse]]))

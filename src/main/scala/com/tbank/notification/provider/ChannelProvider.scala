@@ -18,18 +18,19 @@ object MockPushProvider:
     val logger = LoggerFactory[F].getLogger
     new PushProvider[F]:
       override def sendPush(deviceToken: String, content: String): F[SendResult] =
+        val maskedToken = if deviceToken.length > 8 then deviceToken.take(4) + "..." else "***"
         for
-          _ <- logger.info(s"[PushProvider] Attempting push to token: ${deviceToken.take(10)}...")
+          _ <- logger.info(s"[PushProvider] Attempting push to token: $maskedToken")
           _ <- Async[F].sleep(simulatedDelay)
           result <-
             if deviceToken.startsWith("fail-transient") then
-              logger.warn(s"[PushProvider] Simulated transient error for $deviceToken") *>
+              logger.warn(s"[PushProvider] Simulated transient error for $maskedToken") *>
                 Async[F].pure(SendResult.TransientFailure("APNS connection timeout"))
             else if deviceToken.startsWith("fail-permanent") then
-              logger.error(s"[PushProvider] Simulated permanent error for $deviceToken") *>
+              logger.warn(s"[PushProvider] Simulated permanent error for $maskedToken") *>
                 Async[F].pure(SendResult.PermanentFailure("Device token unregistered"))
             else
-              logger.info(s"[PushProvider] Successfully delivered push to token: ${deviceToken.take(10)}...") *>
+              logger.info(s"[PushProvider] Successfully delivered push to token: $maskedToken") *>
                 Async[F].pure(SendResult.Success("APNS-FCM-Gateway"))
         yield result
 
@@ -44,14 +45,18 @@ object MockSmsProvider:
       override def name: String = providerName
 
       override def sendSms(phoneNumber: String, content: String): F[SendResult] =
+        val maskedPhone = if phoneNumber.length >= 7 then phoneNumber.take(4) + "****" + phoneNumber.takeRight(2) else "***"
         for
-          _ <- logger.info(s"[$name] Sending SMS to $phoneNumber")
+          _ <- logger.info(s"[$name] Sending SMS to $maskedPhone")
           _ <- Async[F].sleep(simulatedDelay)
           result <-
             if alwaysFail || phoneNumber.contains("0000") then
-              logger.warn(s"[$name] Gateway failed for phone: $phoneNumber") *>
+              logger.warn(s"[$name] Gateway failed for phone: $maskedPhone") *>
                 Async[F].pure(SendResult.TransientFailure(s"$name route degraded"))
+            else if phoneNumber.startsWith("+000") then
+              logger.warn(s"[$name] Invalid number format: $maskedPhone") *>
+                Async[F].pure(SendResult.PermanentFailure("Invalid destination phone number"))
             else
-              logger.info(s"[$name] SMS delivered to $phoneNumber successfully") *>
+              logger.info(s"[$name] SMS delivered to $maskedPhone successfully") *>
                 Async[F].pure(SendResult.Success(name))
         yield result
