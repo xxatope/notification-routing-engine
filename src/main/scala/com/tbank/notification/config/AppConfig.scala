@@ -20,10 +20,13 @@ final case class KafkaConfig(
 final case class AppConfig(
     httpServer: HttpServerConfig,
     kafka: KafkaConfig,
-    apiKey: String
+    apiKey: Secret[String]
 )
 
 object AppConfig:
+
+  private val MinApiKeyLength = 16
+
   def load[F[_]: Async]: F[AppConfig] =
     val config = (
       env("HTTP_HOST").as[String].default("0.0.0.0"),
@@ -32,7 +35,7 @@ object AppConfig:
       env("KAFKA_CONSUMER_GROUP").as[String].default("notification-engine-group"),
       env("KAFKA_INPUT_TOPIC").as[String].default("notifications.requests"),
       env("KAFKA_ENABLED").as[Boolean].default(false),
-      env("APP_API_KEY").as[String].default("tbank-secret-key-123")
+      env("APP_API_KEY").secret
     ).parMapN { (hostStr, portInt, bootstrap, group, inTopic, kafkaEnabled, key) =>
       val h = Host.fromString(hostStr).getOrElse(host"0.0.0.0")
       val p = Port.fromInt(portInt).getOrElse(port"8081")
@@ -48,4 +51,10 @@ object AppConfig:
       )
     }
 
-    config.load[F]
+    config.load[F].flatMap { cfg =>
+      if cfg.apiKey.value.length < MinApiKeyLength then
+        Async[F].raiseError[AppConfig](
+          new IllegalArgumentException(s"APP_API_KEY must be at least $MinApiKeyLength characters long")
+        )
+      else Async[F].pure(cfg)
+    }

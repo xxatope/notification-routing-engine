@@ -12,7 +12,8 @@ The service follows **Hexagonal / Clean Architecture**:
 - **Storage Layer**: Interface-driven (`NotificationRepository`). Default in-memory implementation provides atomic Compare-And-Swap (CAS) via `Ref.modify`.
 - **Event-Driven Ingestion**: Optional `KafkaConsumerWorker` powered by `fs2-kafka` for reactive event streaming with batch commit (`commitBatchWithin`).
 - **Security & Data Privacy**: 
-  - Authenticated endpoints via `X-API-Key` header.
+  - Authenticated endpoints via `X-API-Key` header with constant-time equality check (`MessageDigest.isEqual`) to prevent timing attacks.
+  - Secret credentials masked in logs via Ciris `Secret[String]` and `Headers.SensitiveHeaders`.
   - Zero sensitive data leaks: API responses strip message payload/OTP and device tokens; phone numbers and credentials are masked in logs and responses (`+7999****12`).
 
 ---
@@ -50,19 +51,26 @@ The service follows **Hexagonal / Clean Architecture**:
 
 ## Getting Started
 
-### Running Locally
+### 1. Environment Setup
+Copy the template and set a secure key (minimum 16 characters):
+```bash
+cp .env.example .env
+# Edit .env and set APP_API_KEY
+```
+
+### 2. Running Locally
 ```bash
 sbt run
 ```
 The server starts on `http://localhost:8081`.
 Interactive Swagger UI: **http://localhost:8081/docs**
 
-### Running Tests
+### 3. Running Tests
 ```bash
 sbt test
 ```
 
-### Running with Docker & Kafka
+### 4. Running with Docker & Kafka
 To start the application alongside Kafka and Kafka UI:
 ```bash
 docker compose up --build -d
@@ -78,7 +86,7 @@ docker compose up --build -d
 ### 1. Send Critical Notification (2FA)
 ```bash
 curl -X POST http://localhost:8081/api/v1/notifications \
-  -H "X-API-Key: tbank-secret-key-123" \
+  -H "X-API-Key: your-secret-api-key" \
   -H "Content-Type: application/json" \
   -d '{
     "idempotencyKey": "auth-step-40291",
@@ -112,7 +120,7 @@ Response (`200 OK` — sensitive content and token are stripped):
 ### 2. Simulated Cascade Failover
 ```bash
 curl -X POST http://localhost:8081/api/v1/notifications \
-  -H "X-API-Key: tbank-secret-key-123" \
+  -H "X-API-Key: your-secret-api-key" \
   -H "Content-Type: application/json" \
   -d '{
     "idempotencyKey": "auth-step-40292",

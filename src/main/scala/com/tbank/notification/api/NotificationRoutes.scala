@@ -8,17 +8,21 @@ import org.http4s.HttpRoutes
 import sttp.tapir.server.ServerEndpoint
 import sttp.tapir.server.http4s.Http4sServerInterpreter
 import sttp.tapir.swagger.bundle.SwaggerInterpreter
+import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
 
 object NotificationRoutes:
 
   def make[F[_]: Async](engine: RoutingEngine[F], validApiKey: String): HttpRoutes[F] =
 
+    def constantTimeEquals(a: String, b: String): Boolean =
+      MessageDigest.isEqual(a.getBytes(StandardCharsets.UTF_8), b.getBytes(StandardCharsets.UTF_8))
+
     def authenticate(apiKeyOpt: Option[String]): F[Either[AppError, Unit]] =
-      apiKeyOpt match
-        case Some(key) if key == validApiKey =>
-          Async[F].pure(Right(()))
-        case _ =>
-          Async[F].pure(Left(AppError.Unauthorized()))
+      Async[F].pure(
+        if apiKeyOpt.exists(constantTimeEquals(_, validApiKey)) then Right(())
+        else Left(AppError.Unauthorized())
+      )
 
     val healthServerEndpoint: ServerEndpoint[Any, F] =
       NotificationEndpoints.healthEndpoint.serverLogicSuccess(_ => Async[F].pure("UP"))

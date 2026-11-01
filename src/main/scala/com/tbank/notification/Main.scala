@@ -8,8 +8,10 @@ import com.tbank.notification.engine.{InMemoryFrequencyCapper, RoutingEngine}
 import com.tbank.notification.kafka.KafkaConsumerWorker
 import com.tbank.notification.provider.{MockPushProvider, MockSmsProvider}
 import com.tbank.notification.repository.InMemoryNotificationRepository
+import org.http4s.Headers
 import org.http4s.ember.server.EmberServerBuilder
 import org.http4s.server.middleware.Logger as HttpLogger
+import org.typelevel.ci.CIString
 import org.typelevel.log4cats.LoggerFactory
 import org.typelevel.log4cats.slf4j.Slf4jFactory
 
@@ -39,8 +41,12 @@ object Main extends IOApp.Simple:
         repository = repo
       )
 
-      httpApp = NotificationRoutes.make[IO](engine, config.apiKey).orNotFound
-      loggedApp = HttpLogger.httpApp(logHeaders = true, logBody = false)(httpApp)
+      httpApp = NotificationRoutes.make[IO](engine, config.apiKey.value).orNotFound
+      loggedApp = HttpLogger.httpApp(
+        logHeaders = true,
+        logBody = false,
+        redactHeadersWhen = name => Headers.SensitiveHeaders.contains(name) || name == CIString("X-API-Key")
+      )(httpApp)
 
       kafkaWorker = KafkaConsumerWorker.make[IO](config.kafka, engine)
 
