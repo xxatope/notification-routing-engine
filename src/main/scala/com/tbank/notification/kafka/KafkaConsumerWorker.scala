@@ -60,4 +60,4 @@ object KafkaConsumerWorker:
                   logger.error(s"Failed to decode Kafka payload (malformed JSON): ${parseErr.getMessage}") *>
                     Async[F].pure(committable.offset)
             }
-            .through(commitBatchWithin(batchSize = 50, batchTimeout = 1.second))
+            .through(commitBatchWithin[F](50, 1.second))

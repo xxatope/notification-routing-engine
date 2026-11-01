@@ -1,6 +1,7 @@
 package com.tbank.notification
 
 import cats.effect.{IO, IOApp}
+import cats.syntax.all.*
 import com.tbank.notification.api.NotificationRoutes
 import com.tbank.notification.config.AppConfig
 import com.tbank.notification.engine.{InMemoryFrequencyCapper, RoutingEngine}
@@ -55,6 +56,6 @@ object Main extends IOApp.Simple:
             IO.never
         }
 
-      // Запуск сервера и фонового воркера вместе (both)
-      _ <- (serverResource, kafkaWorker.run.compile.drain).parTupled.void
+      // Запуск сервера и воркера параллельно
+      _ <- serverResource.both(kafkaWorker.run.compile.drain).void
     yield ()

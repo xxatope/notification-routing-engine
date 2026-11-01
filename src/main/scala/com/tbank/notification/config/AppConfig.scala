@@ -3,7 +3,7 @@ package com.tbank.notification.config
 import cats.effect.Async
 import cats.syntax.all.*
 import ciris.*
-import com.comcast.ip4s.{Host, Port}
+import com.comcast.ip4s.{Host, Port, host, port}
 
 final case class HttpServerConfig(
     host: Host,
@@ -34,10 +34,9 @@ object AppConfig:
       env("KAFKA_ENABLED").as[Boolean].default(false),
       env("APP_API_KEY").as[String].default("tbank-secret-key-123")
     ).parMapN { (hostStr, portInt, bootstrap, group, inTopic, kafkaEnabled, key) =>
-      for
-        h <- Host.fromString(hostStr).toRight(ConfigError(s"Invalid host format: $hostStr"))
-        p <- Port.fromInt(portInt).toRight(ConfigError(s"Invalid port format: $portInt"))
-      yield AppConfig(
+      val h = Host.fromString(hostStr).getOrElse(host"0.0.0.0")
+      val p = Port.fromInt(portInt).getOrElse(port"8081")
+      AppConfig(
         httpServer = HttpServerConfig(h, p),
         kafka = KafkaConfig(
           bootstrapServers = bootstrap,
@@ -49,4 +48,4 @@ object AppConfig:
       )
     }
 
-    config.evalMap(Async[F].fromEither).load[F]
+    config.load[F]
