@@ -1,6 +1,7 @@
 package com.tbank.notification
 
 import cats.effect.IO
+import cats.syntax.all.*
 import com.tbank.notification.domain.Priority
 import com.tbank.notification.engine.InMemoryFrequencyCapper
 import munit.CatsEffectSuite
