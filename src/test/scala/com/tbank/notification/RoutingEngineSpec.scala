@@ -1,0 +1,152 @@
+package com.tbank.notification
+
+import cats.effect.IO
+import com.tbank.notification.domain.*
+import com.tbank.notification.engine.{InMemoryFrequencyCapper, RoutingEngine}
+import com.tbank.notification.provider.{MockPushProvider, MockSmsProvider}
+import com.tbank.notification.repository.InMemoryNotificationRepository
+import munit.CatsEffectSuite
+import org.typelevel.log4cats.LoggerFactory
+import org.typelevel.log4cats.noop.NoOpFactory
+import scala.concurrent.duration.*
+
+class RoutingEngineSpec extends CatsEffectSuite:
+
+  given LoggerFactory[IO] = NoOpFactory[IO]
+
+  private def buildEngine(
+      pushProvider: com.tbank.notification.provider.PushProvider[IO] = MockPushProvider.make[IO](simulatedDelay = 10.millis),
+      smsPrimary: com.tbank.notification.provider.SmsProvider[IO] = MockSmsProvider.make[IO]("SMS-Primary", simulatedDelay = 10.millis),
+      smsSecondary: com.tbank.notification.provider.SmsProvider[IO] = MockSmsProvider.make[IO]("SMS-Backup", simulatedDelay = 10.millis),
+      maxMarketing: Int = 2
+  ): IO[RoutingEngine[IO]] =
+    for
+      repo   <- InMemoryNotificationRepository.make[IO]
+      capper <- InMemoryFrequencyCapper.make[IO](InMemoryFrequencyCapper.Config(maxMarketingPerWindow = maxMarketing))
+    yield RoutingEngine.make[IO](
+      pushProvider = pushProvider,
+      smsPrimary = smsPrimary,
+      smsSecondary = smsSecondary,
+      frequencyCapper = capper,
+      repository = repo,
+      config = RoutingEngine.Config(pushTimeout = 1.second, smsTimeout = 1.second)
+    )
+
+  test("Deliver via Push when deviceToken is valid") {
+    for
+      engine <- buildEngine()
+      req = NotificationRequest(
+        idempotencyKey = "req-1",
+        userId = "user-1",
+        priority = Priority.Critical,
+        content = "Your login code: 4921",
+        phone = Some("+79991234567"),
+        deviceToken = Some("valid-device-token-abc")
+      )
+      res <- engine.submitNotification(req)
+    yield {
+      assert(res.isRight)
+      res.toOption.get.status match
+        case DeliveryStatus.Delivered(channel, provider, _) =>
+          assertEquals(channel, Channel.Push)
+          assertEquals(provider, "APNS-FCM-Gateway")
+        case other =>
+          fail(s"Expected Delivered via Push, but got: $other")
+    }
+  }
+
+  test("Failover to Primary SMS when Push fails") {
+    for
+      engine <- buildEngine()
+      req = NotificationRequest(
+        idempotencyKey = "req-2",
+        userId = "user-1",
+        priority = Priority.Critical,
+        content = "Your transaction code: 7788",
+        phone = Some("+79991234567"),
+        deviceToken = Some("fail-transient-push-token")
+      )
+      res <- engine.submitNotification(req)
+    yield {
+      assert(res.isRight)
+      res.toOption.get.status match
+        case DeliveryStatus.Delivered(channel, provider, _) =>
+          assertEquals(channel, Channel.Sms)
+          assertEquals(provider, "SMS-Primary")
+        case other =>
+          fail(s"Expected Delivered via Primary SMS, but got: $other")
+    }
+  }
+
+  test("Failover to Secondary SMS when both Push and Primary SMS fail") {
+    val failingPrimarySms = MockSmsProvider.make[IO]("SMS-Primary", simulatedDelay = 10.millis, alwaysFail = true)
+    for
+      engine <- buildEngine(smsPrimary = failingPrimarySms)
+      req = NotificationRequest(
+        idempotencyKey = "req-3",
+        userId = "user-1",
+        priority = Priority.Critical,
+        content = "Security alert",
+        phone = Some("+79991234567"),
+        deviceToken = Some("fail-transient-push-token")
+      )
+      res <- engine.submitNotification(req)
+    yield {
+      assert(res.isRight)
+      res.toOption.get.status match
+        case DeliveryStatus.Delivered(channel, provider, _) =>
+          assertEquals(channel, Channel.Sms)
+          assertEquals(provider, "SMS-Backup")
+        case other =>
+          fail(s"Expected Delivered via SMS-Backup, but got: $other")
+    }
+  }
+
+  test("Idempotency: duplicate request returns the exact same record without reprocessing") {
+    for
+      engine <- buildEngine()
+      req = NotificationRequest(
+        idempotencyKey = "idempotent-key-999",
+        userId = "user-2",
+        priority = Priority.Marketing,
+        content = "10% cashback on coffee",
+        phone = Some("+79998887766"),
+        deviceToken = None
+      )
+      first  <- engine.submitNotification(req)
+      second <- engine.submitNotification(req)
+    yield {
+      assert(first.isRight)
+      assert(second.isRight)
+      assertEquals(first.toOption.get.id, second.toOption.get.id, "IDs must match")
+      assertEquals(first.toOption.get.status, second.toOption.get.status, "Statuses must match")
+    }
+  }
+
+  test("Marketing notification rejected when Frequency Cap exceeded") {
+    for
+      engine <- buildEngine(maxMarketing = 1)
+      req1 = NotificationRequest(
+        idempotencyKey = "promo-1",
+        userId = "user-marketing-test",
+        priority = Priority.Marketing,
+        content = "Promo 1",
+        phone = Some("+79991112233")
+      )
+      req2 = NotificationRequest(
+        idempotencyKey = "promo-2",
+        userId = "user-marketing-test",
+        priority = Priority.Marketing,
+        content = "Promo 2",
+        phone = Some("+79991112233")
+      )
+      res1 <- engine.submitNotification(req1)
+      res2 <- engine.submitNotification(req2)
+    yield {
+      assert(res1.isRight, "First promo must succeed")
+      assert(res2.isLeft, "Second promo must be rejected due to limit")
+      res2.left.toOption.get match
+        case AppError.RateLimitExceeded(user, _) => assertEquals(user, "user-marketing-test")
+        case other => fail(s"Expected RateLimitExceeded, but got: $other")
+    }
+  }
