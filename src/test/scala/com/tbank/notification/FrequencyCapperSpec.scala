@@ -5,12 +5,12 @@ import com.tbank.notification.domain.Priority
 import com.tbank.notification.engine.InMemoryFrequencyCapper
 import munit.CatsEffectSuite
 import org.typelevel.log4cats.LoggerFactory
-import org.typelevel.log4cats.noop.NoOpFactory
+import org.typelevel.log4cats.slf4j.Slf4jFactory
 import scala.concurrent.duration.*
 
 class FrequencyCapperSpec extends CatsEffectSuite:
 
-  given LoggerFactory[IO] = NoOpFactory[IO]
+  given LoggerFactory[IO] = Slf4jFactory.create[IO]
 
   test("Critical priority notifications must never be blocked by frequency capping") {
     for

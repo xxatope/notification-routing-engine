@@ -7,12 +7,12 @@ import com.tbank.notification.provider.{MockPushProvider, MockSmsProvider}
 import com.tbank.notification.repository.InMemoryNotificationRepository
 import munit.CatsEffectSuite
 import org.typelevel.log4cats.LoggerFactory
-import org.typelevel.log4cats.noop.NoOpFactory
+import org.typelevel.log4cats.slf4j.Slf4jFactory
 import scala.concurrent.duration.*
 
 class RoutingEngineSpec extends CatsEffectSuite:
 
-  given LoggerFactory[IO] = NoOpFactory[IO]
+  given LoggerFactory[IO] = Slf4jFactory.create[IO]
 
   private def buildEngine(
       pushProvider: com.tbank.notification.provider.PushProvider[IO] = MockPushProvider.make[IO](simulatedDelay = 10.millis),
