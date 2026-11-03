@@ -44,33 +44,33 @@ object RoutingEngine:
         repository.listByUser(userId, limit)
 
       override def submitNotification(request: NotificationRequest): F[Either[AppError, NotificationRecord]] =
-        request.validate match
-          case Left(validationError) =>
-            Async[F].pure(Left(AppError.ValidationError(validationError)))
+        request.validate.toEither match
+          case Left(errors) =>
+            val combinedError = errors.toNonEmptyList.toList.mkString("; ")
+            Async[F].pure(Left(AppError.ValidationError(combinedError)))
 
-          case Right(()) =>
+          case Right(validRequest) =>
             for
               now <- Async[F].realTimeInstant
               id  <- Async[F].delay(UUID.randomUUID())
 
               initialRecord = NotificationRecord(
                 id = id,
-                idempotencyKey = request.idempotencyKey,
-                userId = request.userId,
-                priority = request.priority,
-                content = request.content,
-                phone = request.phone,
-                deviceToken = request.deviceToken,
+                idempotencyKey = validRequest.idempotencyKey,
+                userId = validRequest.userId,
+                priority = validRequest.priority,
+                content = validRequest.content,
+                phone = validRequest.phone,
+                deviceToken = validRequest.deviceToken,
                 status = DeliveryStatus.InProgress,
                 createdAt = now,
                 updatedAt = now
               )
 
-              // Атомарная попытка вставки
               insertResult <- repository.insertIfAbsent(initialRecord)
               outcome <- insertResult match
                 case Left(existing) =>
-                  handleExistingRecord(existing, request, now)
+                  handleExistingRecord(existing, validRequest, now)
 
                 case Right(newRecord) =>
                   processNewRecord(newRecord, now)
@@ -85,15 +85,25 @@ object RoutingEngine:
           case DeliveryStatus.InProgress =>
             val age = java.time.Duration.between(existing.updatedAt, now).toMillis
             if age > config.inProgressLeaseTimeout.toMillis then
-              logger.warn(
-                s"Stale InProgress record detected for key '${request.idempotencyKey}' (age: ${age}ms). Resuming delivery."
-              ) *> processCascadeSafe(existing)
+              repository.tryAcquireLease(existing.id, existing.updatedAt, now).flatMap {
+                case true =>
+                  logger.warn(
+                    s"Acquired lease for stale record '${request.idempotencyKey}' (age: ${age}ms). Resuming delivery."
+                  ) *> processCascadeSafe(existing.copy(updatedAt = now))
+                case false =>
+                  logger.info(
+                    s"Lease for '${request.idempotencyKey}' acquired by concurrent worker. Returning existing."
+                  ) *> Async[F].pure(Right(existing))
+              }
             else
               logger.info(s"Duplicate request '${request.idempotencyKey}' currently InProgress. Returning record.") *>
                 Async[F].pure(Right(existing))
 
           case DeliveryStatus.RateLimited =>
             Async[F].pure(Left(AppError.RateLimitExceeded(existing.userId, frequencyCapper.maxLimit)))
+
+          case DeliveryStatus.Failed(reason) =>
+            Async[F].pure(Left(AppError.DeliveryFailed(reason)))
 
           case _ =>
             logger.info(s"Duplicate request '${request.idempotencyKey}' already completed. Returning existing.") *>
@@ -125,12 +135,14 @@ object RoutingEngine:
           status      <- execution
           completedAt <- Async[F].realTimeInstant
           _           <- repository.updateStatus(record.id, status, completedAt)
-          _ <- status match
-            case DeliveryStatus.Failed(_) =>
-              frequencyCapper.refund(record.userId, record.priority)
+          finalRecord = record.copy(status = status, updatedAt = completedAt)
+          result <- status match
+            case DeliveryStatus.Failed(reason) =>
+              frequencyCapper.refund(record.userId, record.priority) *>
+                Async[F].pure(Left(AppError.DeliveryFailed(reason)))
             case _ =>
-              Async[F].unit
-        yield Right(record.copy(status = status, updatedAt = completedAt))
+              Async[F].pure(Right(finalRecord))
+        yield result
 
       private def executeCascade(record: NotificationRecord): F[DeliveryStatus] =
         tryPush(record).flatMap {

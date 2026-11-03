@@ -62,6 +62,6 @@ object Main extends IOApp.Simple:
             IO.never
         }
 
-      // Запуск сервера и воркера параллельно
+
       _ <- serverResource.both(kafkaWorker.run.compile.drain).void
     yield ()

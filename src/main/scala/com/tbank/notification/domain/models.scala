@@ -1,5 +1,7 @@
 package com.tbank.notification.domain
 
+import cats.data.ValidatedNec
+import cats.syntax.all.*
 import io.circe.{Codec, Decoder, Encoder}
 import io.circe.generic.semiauto.*
 import sttp.tapir.Schema
@@ -66,23 +68,23 @@ final case class NotificationRequest(
     phone: Option[String] = None,
     deviceToken: Option[String] = None
 ):
-  def validate: Either[String, Unit] =
-    if idempotencyKey.trim.isEmpty || idempotencyKey.length > 128 then
-      Left("idempotencyKey must be between 1 and 128 characters")
-    else if userId.trim.isEmpty then
-      Left("userId must not be empty")
-    else if content.trim.isEmpty then
-      Left("content must not be empty")
-    else if phone.isEmpty && deviceToken.isEmpty then
-      Left("At least one delivery destination (phone or deviceToken) must be specified")
-    else
-      Right(())
+  def validate: ValidatedNec[String, NotificationRequest] =
+    (
+      Option.when(idempotencyKey.trim.nonEmpty && idempotencyKey.length <= 128)(())
+        .toValidNec("idempotencyKey must be between 1 and 128 characters"),
+      Option.when(userId.trim.nonEmpty)(())
+        .toValidNec("userId must not be empty"),
+      Option.when(content.trim.nonEmpty)(())
+        .toValidNec("content must not be empty"),
+      Option.when(phone.isDefined || deviceToken.isDefined)(())
+        .toValidNec("At least one delivery destination (phone or deviceToken) must be specified")
+    ).mapN((_, _, _, _) => this)
 
 object NotificationRequest:
   given Codec[NotificationRequest] = deriveCodec[NotificationRequest]
   given Schema[NotificationRequest] = Schema.derived[NotificationRequest]
 
-// Хранилище (внутренняя модель с полными данными)
+
 final case class NotificationRecord(
     id: UUID,
     idempotencyKey: String,
@@ -100,7 +102,7 @@ object NotificationRecord:
   given Codec[NotificationRecord] = deriveCodec[NotificationRecord]
   given Schema[NotificationRecord] = Schema.derived[NotificationRecord]
 
-// Публичный ответ API (БЕЗ раскрытия OTP content и deviceToken)
+
 final case class NotificationResponse(
     id: UUID,
     idempotencyKey: String,

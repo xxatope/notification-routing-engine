@@ -3,7 +3,7 @@ package com.tbank.notification.config
 import cats.effect.Async
 import cats.syntax.all.*
 import ciris.*
-import com.comcast.ip4s.{Host, Port, host, port}
+import com.comcast.ip4s.{Host, Port}
 
 final case class HttpServerConfig(
     host: Host,
@@ -37,9 +37,28 @@ object AppConfig:
       env("KAFKA_ENABLED").as[Boolean].default(false),
       env("APP_API_KEY").secret
     ).parMapN { (hostStr, portInt, bootstrap, group, inTopic, kafkaEnabled, key) =>
-      val h = Host.fromString(hostStr).getOrElse(host"0.0.0.0")
-      val p = Port.fromInt(portInt).getOrElse(port"8081")
-      AppConfig(
+      (hostStr, portInt, bootstrap, group, inTopic, kafkaEnabled, key)
+    }
+
+    config.load[F].flatMap { case (hostStr, portInt, bootstrap, group, inTopic, kafkaEnabled, key) =>
+      for
+        h <- Host.fromString(hostStr) match
+          case Some(parsedHost) => Async[F].pure(parsedHost)
+          case None =>
+            Async[F].raiseError[Host](new IllegalArgumentException(s"Invalid HTTP_HOST configuration: '$hostStr'"))
+
+        p <- Port.fromInt(portInt) match
+          case Some(parsedPort) => Async[F].pure(parsedPort)
+          case None =>
+            Async[F].raiseError[Port](new IllegalArgumentException(s"Invalid HTTP_PORT configuration: '$portInt'"))
+
+        _ <-
+          if key.value.length < MinApiKeyLength then
+            Async[F].raiseError[Unit](
+              new IllegalArgumentException(s"APP_API_KEY must be at least $MinApiKeyLength characters long")
+            )
+          else Async[F].unit
+      yield AppConfig(
         httpServer = HttpServerConfig(h, p),
         kafka = KafkaConfig(
           bootstrapServers = bootstrap,
@@ -49,12 +68,4 @@ object AppConfig:
         ),
         apiKey = key
       )
-    }
-
-    config.load[F].flatMap { cfg =>
-      if cfg.apiKey.value.length < MinApiKeyLength then
-        Async[F].raiseError[AppConfig](
-          new IllegalArgumentException(s"APP_API_KEY must be at least $MinApiKeyLength characters long")
-        )
-      else Async[F].pure(cfg)
     }

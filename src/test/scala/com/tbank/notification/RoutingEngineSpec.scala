@@ -103,7 +103,7 @@ class RoutingEngineSpec extends CatsEffectSuite:
     }
   }
 
-  test("Stop cascade when Primary SMS fails with PermanentFailure") {
+  test("Stop cascade when Primary SMS fails with PermanentFailure and return DeliveryFailed") {
     val permanentFailSms = new SmsProvider[IO]:
       def name: String = "Permanent-Fail-SMS"
       def sendSms(phone: String, content: String): IO[SendResult] =
@@ -121,12 +121,12 @@ class RoutingEngineSpec extends CatsEffectSuite:
       )
       res <- engine.submitNotification(req)
     yield {
-      assert(res.isRight)
-      res.toOption.get.status match
-        case DeliveryStatus.Failed(reason) =>
+      assert(res.isLeft)
+      res.left.toOption.get match
+        case AppError.DeliveryFailed(reason) =>
           assert(reason.contains("SMS permanently failed"))
         case other =>
-          fail(s"Expected DeliveryStatus.Failed, got $other")
+          fail(s"Expected AppError.DeliveryFailed, got $other")
     }
   }
 
@@ -172,7 +172,6 @@ class RoutingEngineSpec extends CatsEffectSuite:
         phone = None,
         deviceToken = Some("token-parallel")
       )
-      // 5 одновременных запросов
       results <- (1 to 5).toList.parTraverse(_ => engine.submitNotification(req))
       totalCalls <- callCounter.get
     yield {

@@ -11,6 +11,7 @@ trait NotificationRepository[F[_]]:
   def findById(id: UUID): F[Option[NotificationRecord]]
   def findByIdempotencyKey(key: String): F[Option[NotificationRecord]]
   def updateStatus(id: UUID, status: DeliveryStatus, updatedAt: Instant): F[Unit]
+  def tryAcquireLease(id: UUID, expectedUpdatedAt: Instant, newUpdatedAt: Instant): F[Boolean]
   def listByUser(userId: String, limit: Int = 50): F[List[NotificationRecord]]
 
 object InMemoryNotificationRepository:
@@ -58,6 +59,16 @@ object InMemoryNotificationRepository:
                 state.copy(byId = state.byId.updated(id, existing.copy(status = status, updatedAt = updatedAt)))
               case None =>
                 state
+          }
+
+        override def tryAcquireLease(id: UUID, expectedUpdatedAt: Instant, newUpdatedAt: Instant): F[Boolean] =
+          storage.modify { state =>
+            state.byId.get(id) match
+              case Some(existing) if existing.updatedAt == expectedUpdatedAt && existing.status == DeliveryStatus.InProgress =>
+                val updated = existing.copy(updatedAt = newUpdatedAt)
+                (state.copy(byId = state.byId.updated(id, updated)), true)
+              case _ =>
+                (state, false)
           }
 
         override def listByUser(userId: String, limit: Int = 50): F[List[NotificationRecord]] =

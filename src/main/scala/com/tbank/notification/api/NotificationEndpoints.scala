@@ -27,6 +27,7 @@ object NotificationEndpoints:
         oneOfVariant(StatusCode.NotFound, jsonBody[AppError.NotFound].description("Notification not found")),
         oneOfVariant(StatusCode.Conflict, jsonBody[AppError.AlreadyExists].description("Duplicate request")),
         oneOfVariant(StatusCode.TooManyRequests, jsonBody[AppError.RateLimitExceeded].description("Marketing rate limit reached")),
+        oneOfVariant(StatusCode.BadGateway, jsonBody[AppError.DeliveryFailed].description("Delivery failed across all channels")),
         oneOfVariant(StatusCode.BadRequest, jsonBody[AppError.ValidationError].description("Validation error")),
         oneOfVariant(StatusCode.InternalServerError, jsonBody[AppError.InternalError].description("Internal server error"))
       )
@@ -34,7 +35,7 @@ object NotificationEndpoints:
 
   val sendNotificationEndpoint = secureBaseEndpoint.post
     .summary("Send or queue a notification")
-    .description("Sends a notification with cascade fallback and anti-spam check. Sensitive data is stripped from response.")
+    .description("Sends a notification with cascade fallback and anti-spam check. Returns 502 Bad Gateway if all channels fail.")
     .in(jsonBody[NotificationRequest])
     .out(statusCode(StatusCode.Ok).and(jsonBody[NotificationResponse]))
 

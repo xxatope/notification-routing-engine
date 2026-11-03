@@ -39,6 +39,13 @@ object AppError:
     given Codec[RateLimitExceeded] = deriveCodec[RateLimitExceeded]
     given Schema[RateLimitExceeded] = Schema.derived[RateLimitExceeded]
 
+  final case class DeliveryFailed(reason: String) extends AppError:
+    val message = s"Delivery failed: $reason"
+
+  object DeliveryFailed:
+    given Codec[DeliveryFailed] = deriveCodec[DeliveryFailed]
+    given Schema[DeliveryFailed] = Schema.derived[DeliveryFailed]
+
   final case class ValidationError(details: String) extends AppError:
     val message = s"Validation failed: $details"
 
